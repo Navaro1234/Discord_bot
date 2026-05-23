@@ -32,7 +32,7 @@ async def on_message(message):
         await message.reply('pong')
         return
     elif message.content.lower() == '/admin':
-        await message.reply('navaroke2512 is de admin. Land = :flag_be:.')
+        await message.reply('navaroke2512 is de admin. Land = :flag_be:. ')
         return
     elif 'lief' in message.content.lower():
         await message.add_reaction('🗑️')

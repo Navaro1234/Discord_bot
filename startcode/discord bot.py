@@ -6,17 +6,14 @@ from google import genai
 from dotenv import load_dotenv
 
 # --- CENTRALE APPDATA MAP INSTELLEN ---
-# Dit verwijst naar: C:\Users\<Gebruikersnaam>\AppData\Local\Discord_bot
 APPDATA_DIR = os.path.join(os.getenv("LOCALAPPDATA"), "Discord_bot")
 ENV_FILE = os.path.join(APPDATA_DIR, ".env")
 JSON_FILE = os.path.join(APPDATA_DIR, "chat_geschiedenis.json")
 
-# Zorg ervoor dat de map direct wordt aangemaakt als deze nog niet bestaat
 os.makedirs(APPDATA_DIR, exist_ok=True)
 
 
 def configureer_env():
-    """Controleert .env in AppData en vraagt om invoer indien nodig"""
     if os.path.exists(ENV_FILE):
         load_dotenv(ENV_FILE)
         if os.getenv("DISCORD_TOKEN") and os.getenv("GEMINI_API_KEY"):
@@ -34,7 +31,6 @@ def configureer_env():
         print("\n❌ Fout: Beide sleutels zijn verplicht!")
         exit(1)
 
-    # Schrijf de sleutels rechtstreeks naar de AppData locatie
     with open(ENV_FILE, "w", encoding="utf-8") as f:
         f.write(f"DISCORD_TOKEN={discord_token}\n")
         f.write(f"GEMINI_API_KEY={gemini_key}\n")
@@ -44,67 +40,82 @@ def configureer_env():
     load_dotenv(ENV_FILE)
 
 
-# Voer de configuratie uit
 configureer_env()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Initialiseer de Google Gemini client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="$", intents=intents)
 
-# --- JSON GEHEUGEN FUNCTIES ---
+# --- JSON GEHEUGEN EN GEBRUIKERS FUNCTIES ---
 MAX_GEHEUGEN = 10
 
 
-def laad_geschiedenis_uit_json():
-    """Laad de volledige geschiedenis in uit het JSON-bestand"""
+def laad_data_uit_json():
+    """Laad de volledige data (geschiedenis + gebruikers) uit de JSON"""
     if os.path.exists(JSON_FILE):
         try:
             with open(JSON_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                # Zorg dat de basisstructuur altijd klopt
+                if "geschiedenis" not in data: data["geschiedenis"] = {}
+                if "gebruikers" not in data: data["gebruikers"] = []
+                return data
         except Exception as e:
-            print(f"Fout bij laden JSON, we starten met leeg geheugen: {e}")
-    return {}
+            print(f"Fout bij laden JSON, we herstarten de structuur: {e}")
+    return {"geschiedenis": {}, "gebruikers": []}
 
 
-def bewaar_geschiedenis_in_json(geschiedenis_data):
-    """Schrijft de bijgewerkte geschiedenis weg naar het JSON-bestand"""
+def bewaar_data_in_json(data):
+    """Schrijft de bijgewerkte data weg naar de JSON"""
     try:
         with open(JSON_FILE, "w", encoding="utf-8") as f:
-            json.dump(geschiedenis_data, f, indent=4, ensure_ascii=False)
+            json.dump(data, f, indent=4, ensure_ascii=False)
     except Exception as e:
         print(f"Fout bij opslaan naar JSON: {e}")
 
 
-def voeg_toe_aan_geheugen(channel_id, rol, tekst):
-    """Voegt een bericht toe en slaat dit direct permanent op in de JSON"""
-    # Altijd de meest recente stand van zaken inlezen
-    geheugen = laad_geschiedenis_uit_json()
-    str_channel_id = str(channel_id)  # JSON keys moeten altijd strings zijn
+def controleer_en_welkom_gebruiker(user):
+    """Checkt of een gebruiker nieuw is, slaat deze op en geeft True/False terug"""
+    data = laad_data_uit_json()
+    user_id_str = str(user.id)
 
-    if str_channel_id not in geheugen:
-        geheugen[str_channel_id] = []
+    # Als de gebruiker al bekend is, doen we niks
+    if user_id_str in data["gebruikers"]:
+        return False
+
+    # Voeg nieuwe gebruiker toe aan de lijst
+    data["gebruikers"].append(user_id_str)
+    bewaar_data_in_json(data)
+    print(f"🆕 Nieuwe gebruiker geregistreerd in JSON: {user.name} ({user_id_str})")
+    return True
+
+
+def voeg_toe_aan_geheugen(channel_id, rol, tekst):
+    """Voegt een bericht toe aan de chatgeschiedenis in de JSON"""
+    data = laad_data_uit_json()
+    str_channel_id = str(channel_id)
+
+    if str_channel_id not in data["geschiedenis"]:
+        data["geschiedenis"][str_channel_id] = []
 
     api_rol = "user" if rol == "user" else "model"
-    geheugen[str_channel_id].append({"role": api_rol, "parts": [{"text": tekst}]})
+    data["geschiedenis"][str_channel_id].append({"role": api_rol, "parts": [{"text": tekst}]})
 
-    # Sloop het oudste bericht als de limiet is bereikt
-    if len(geheugen[str_channel_id]) > MAX_GEHEUGEN:
-        geheugen[str_channel_id].pop(0)
+    if len(data["geschiedenis"][str_channel_id]) > MAX_GEHEUGEN:
+        data["geschiedenis"][str_channel_id].pop(0)
 
-    # Schrijf meteen weg naar AppData
-    bewaar_geschiedenis_in_json(geheugen)
+    bewaar_data_in_json(data)
 
 
 def haal_geschiedenis_op(channel_id):
     """Haalt de geschiedenis op voor Gemini"""
-    geheugen = laad_geschiedenis_uit_json()
-    return geheugen.get(str(channel_id), [])
+    data = laad_data_uit_json()
+    return data["geschiedenis"].get(str(channel_id), [])
 
 
 # HULPFUNCTIE: Knipt lange AI-antwoorden netjes op per 2000 tekens
@@ -130,6 +141,13 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+
+    # --- NIEUW: GEBRUIKERS CONTROLE ---
+    # Controleer of de persoon die typt nieuw is voor de bot
+    is_nieuw = controleer_en_welkom_gebruiker(message.author)
+    if is_nieuw:
+        await message.channel.send(
+            f"👋 Hallo {message.author.mention}! Ik had je nog niet eerder gezien. Welkom bij de bot! Typ `$vraag` of tag me via `@Aap` om met me te praten.")
 
     # 1. Je originele handmatige reacties
     if message.content.lower() == 'ping':
@@ -158,7 +176,7 @@ async def on_message(message):
                     model='gemini-2.5-flash',
                     contents=volledige_geschiedenis,
                     config={
-                        "system_instruction": "Je bent een behulpzame Discord-assistent genaamd Aap. Antwoord beknopt waar mogelijk."
+                        "system_instruction": f"Je bent een behulpzame Discord-assistent genaamd Aap. Je praat nu met {message.author.name}. Antwoord beknopt waar mogelijk."
                     }
                 )
 
@@ -177,7 +195,7 @@ async def on_message(message):
 
 @bot.command()
 async def vraag(ctx, *, bericht: str):
-    """Typ $vraag [jouw bericht] om gratis met Gemini te praten (onthoudt context via JSON)"""
+    """Typ $vraag [jouw bericht] om gratis met Gemini te praten"""
     async with ctx.typing():
         try:
             voeg_toe_aan_geheugen(ctx.channel.id, "user", bericht)
@@ -187,7 +205,7 @@ async def vraag(ctx, *, bericht: str):
                 model='gemini-2.5-flash',
                 contents=volledige_geschiedenis,
                 config={
-                    "system_instruction": "Je bent een behulpzame Discord-assistent genaamd Aap. Antwoord beknopt waar mogelijk."
+                    "system_instruction": f"Je bent een behulpzame Discord-assistent genaamd Aap. Je praat nu met {ctx.author.name}. Antwoord beknopt waar mogelijk."
                 }
             )
 
@@ -202,13 +220,13 @@ async def vraag(ctx, *, bericht: str):
 @bot.command()
 async def clear(ctx):
     """Wist de opgeslagen chatgeschiedenis in de JSON voor dit kanaal"""
-    geheugen = laad_geschiedenis_uit_json()
+    data = laad_data_uit_json()
     str_channel_id = str(ctx.channel.id)
 
-    if str_channel_id in geheugen:
-        del geheugen[str_channel_id]
-        bewaar_geschiedenis_in_json(geheugen)
-        await ctx.reply("🧹 Het geheugen voor dit kanaal is gewist uit de JSON!")
+    if str_channel_id in data["geschiedenis"]:
+        del data["geschiedenis"][str_channel_id]
+        bewaar_data_in_json(data)
+        await ctx.reply("🧹 Het chatgeheugen voor dit kanaal is gewist uit de JSON!")
     else:
         await ctx.reply("Er was nog geen geschiedenis opgeslagen voor dit kanaal.")
 

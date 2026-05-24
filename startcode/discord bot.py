@@ -5,7 +5,9 @@ from discord.ext import commands
 from google import genai
 from dotenv import load_dotenv
 
-# --- CENTRALE APPDATA MAP INSTELLEN ---
+# --- CONFIGURATIE EN BEHEERDERSGEGEVENS ---
+ADMIN_USERNAME = "navaroke2512"  # Jouw exacte Discord gebruikersnaam
+
 APPDATA_DIR = os.path.join(os.getenv("LOCALAPPDATA"), "Discord_bot")
 ENV_FILE = os.path.join(APPDATA_DIR, ".env")
 JSON_FILE = os.path.join(APPDATA_DIR, "chat_geschiedenis.json")
@@ -56,12 +58,10 @@ MAX_GEHEUGEN = 10
 
 
 def laad_data_uit_json():
-    """Laad de volledige data (geschiedenis + gebruikers) uit de JSON"""
     if os.path.exists(JSON_FILE):
         try:
             with open(JSON_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # Zorg dat de basisstructuur altijd klopt
                 if "geschiedenis" not in data: data["geschiedenis"] = {}
                 if "gebruikers" not in data: data["gebruikers"] = []
                 return data
@@ -71,7 +71,6 @@ def laad_data_uit_json():
 
 
 def bewaar_data_in_json(data):
-    """Schrijft de bijgewerkte data weg naar de JSON"""
     try:
         with open(JSON_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
@@ -80,15 +79,12 @@ def bewaar_data_in_json(data):
 
 
 def controleer_en_welkom_gebruiker(user):
-    """Checkt of een gebruiker nieuw is, slaat deze op en geeft True/False terug"""
     data = laad_data_uit_json()
     user_id_str = str(user.id)
 
-    # Als de gebruiker al bekend is, doen we niks
     if user_id_str in data["gebruikers"]:
         return False
 
-    # Voeg nieuwe gebruiker toe aan de lijst
     data["gebruikers"].append(user_id_str)
     bewaar_data_in_json(data)
     print(f"🆕 Nieuwe gebruiker geregistreerd in JSON: {user.name} ({user_id_str})")
@@ -96,7 +92,6 @@ def controleer_en_welkom_gebruiker(user):
 
 
 def voeg_toe_aan_geheugen(channel_id, rol, tekst):
-    """Voegt een bericht toe aan de chatgeschiedenis in de JSON"""
     data = laad_data_uit_json()
     str_channel_id = str(channel_id)
 
@@ -113,7 +108,6 @@ def voeg_toe_aan_geheugen(channel_id, rol, tekst):
 
 
 def haal_geschiedenis_op(channel_id):
-    """Haalt de geschiedenis op voor Gemini"""
     data = laad_data_uit_json()
     return data["geschiedenis"].get(str(channel_id), [])
 
@@ -142,12 +136,15 @@ async def on_message(message):
     if message.author == bot.user:
         return
 
-    # --- NIEUW: GEBRUIKERS CONTROLE ---
-    # Controleer of de persoon die typt nieuw is voor de bot
-    is_nieuw = controleer_en_welkom_gebruiker(message.author)
-    if is_nieuw:
-        await message.channel.send(
-            f"👋 Hallo {message.author.mention}! Ik had je nog niet eerder gezien. Welkom bij de bot! Typ `$vraag` of tag me via `@Aap` om met me te praten.")
+    # Controleer of het een privébericht (DM) is óf een serverkanaal
+    is_dm = isinstance(message.channel, discord.DMChannel)
+
+    # Verwerk welkomstberichten alleen in serverkanalen (niet in DM)
+    if not is_dm:
+        is_nieuw = controleer_en_welkom_gebruiker(message.author)
+        if is_nieuw:
+            await message.channel.send(
+                f"👋 Hallo {message.author.mention}! Ik had je nog niet eerder gezien. Welkom bij de bot! Typ `$vraag` of tag me via `@Aap` om met me te praten.")
 
     # 1. Je originele handmatige reacties
     if message.content.lower() == 'ping':
@@ -159,12 +156,18 @@ async def on_message(message):
     elif 'lief' in message.content.lower():
         await message.add_reaction('🗑️')
 
-    # 2. Reageren als de bot wordt getagd met @Aap
-    if bot.user in message.mentions:
+    # 2. Reageren als de bot wordt getagd met @Aap óf als je in DM rechtstreeks praat
+    if bot.user in message.mentions or is_dm:
+        # Als het een DM is hoef je de bot niet te taggen, dus halen we de tag alleen weg als die er staat
         schone_tekst = message.content.replace(f'<@{bot.user.id}>', '').strip()
 
+        # Voorkom dat de bot reageert op commando's die met $ beginnen in DM
+        if schone_tekst.startswith("$"):
+            await bot.process_commands(message)
+            return
+
         if not schone_tekst:
-            await message.reply("Je hebt me getagd! Waar kan ik je vandaag mee helpen?")
+            await message.reply("Waar kan ik je vandaag mee helpen?")
             return
 
         async with message.channel.typing():
@@ -191,30 +194,32 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-# --- COMMANDO'S ---
+# --- EXCLUSIEF ADMIN COMMANDO (ALLEEN IN DM VOOR NAVAROKE2512) ---
 
 @bot.command()
-async def vraag(ctx, *, bericht: str):
-    """Typ $vraag [jouw bericht] om gratis met Gemini te praten"""
-    async with ctx.typing():
-        try:
-            voeg_toe_aan_geheugen(ctx.channel.id, "user", bericht)
-            volledige_geschiedenis = haal_geschiedenis_op(ctx.channel.id)
+async def stats(ctx):
+    """Toont botstatistieken. Werkt alleen in DM voor de beheerder."""
+    # Controle 1: Is het een privéchat?
+    if not isinstance(ctx.channel, discord.DMChannel):
+        await ctx.reply("❌ Dit commando kan om veiligheidsredenen alleen in een privéchat (DM) worden gebruikt.")
+        return
 
-            response = ai_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=volledige_geschiedenis,
-                config={
-                    "system_instruction": f"Je bent een behulpzame Discord-assistent genaamd Aap. Je praat nu met {ctx.author.name}. Antwoord beknopt waar mogelijk."
-                }
-            )
+    # Controle 2: Ben jij het wel echt?
+    if ctx.author.name != ADMIN_USERNAME:
+        await ctx.reply("🔒 Je hebt geen toestemming om dit commando te gebruiken.")
+        return
 
-            voeg_toe_aan_geheugen(ctx.channel.id, "model", response.text)
-            await stuur_lang_bericht(ctx, response.text)
+    # Gegevens ophalen uit de JSON
+    data = laad_data_uit_json()
+    aantal_gebruikers = len(data.get("gebruikers", []))
+    aantal_kanalen = len(data.get("geschiedenis", {}))
 
-        except Exception as e:
-            print(f"!!! GEMINI FOUTMELDING !!!: {e}")
-            await ctx.send("Er is een fout opgetreden bij het praten met Google Gemini.")
+    embed = discord.Embed(title="📊 Aap Bot Statistieken", color=discord.Color.blue())
+    embed.add_field(name="Totaal geregistreerde gebruikers", value=f"👤 {aantal_gebruikers}", inline=False)
+    embed.add_field(name="Kanalen met actieve geschiedenis", value=f"💬 {aantal_kanalen}", inline=False)
+    embed.add_field(name="Opslaglocatie", value=f"📂 `{JSON_FILE}`", inline=False)
+
+    await ctx.send(embed=embed)
 
 
 @bot.command()
